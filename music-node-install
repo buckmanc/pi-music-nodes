@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+
+# run this under screen/tmux coz it takes forever
+# safe to re-run; updates shit as necessary
+# example usage
+# screen pi-install
+# ssh nes-pi
+# curl myscript | bash
+
+# TODO add a wrapper script that fires off updates / installs on a known list of pis
+# will still have to manually check in on it tho
+
+set -e
+
+musicNodeRootUrl='https://raw.githubusercontent.com/buckmanc/pi-music-nodes/refs/heads/main'
+sendspinInstallUrl='https://raw.githubusercontent.com/Sendspin/sendspin-cli/refs/heads/main/scripts/systemd/install-systemd.sh'
+raspotifyInstallUrl='https://raw.githubusercontent.com/dtcooper/raspotify/refs/heads/master/install.sh'
+rpiMqttMonitorInstallUrl='https://raw.githubusercontent.com/hjelev/rpi-mqtt-monitor/master/remote_install.sh'
+
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y vim curl libffi-dev python3-dev libjpeg-dev zlib1g-dev libportaudio2 libopenblas0 screen mpd sox mpc alsa-utils
+
+# dmix config to allow sound to play from multiple sources
+sudo curl -fsSL "$musicNodeRootUrl/config/asound.conf" \
+	-o /etc/asound.conf
+
+# hardware volume
+# setting the default high so the software volumes can be set lower and still have headroom
+# amixer set PCM 85%
+sudo amixer -c 0 sset 'PCM' 90%
+sudo alsactl store
+
+# -------- remote monitoring for home assistant --------
+# this goes near the top coz it's a lot of manual questions
+if (type rpi-mqtt-monitor 2>/dev/null)
+then
+	rpi-mqtt-monitor --update
+else
+	bash <(curl -s "$rpiMqttMonitorInstallUrl")
+fi
+
+
+# -------- sendspin daemon --------
+if (type sendspin 2>/dev/null)
+then
+	uv tool upgrade sendspin
+	sudo systemctl restart sendspin
+else
+	# slap " | cat" on the end to make it run in non-interactive mode
+	curl -fsSL "$sendspinInstallUrl" | sudo bash
+
+	# -------- force sendspin to software volume, wherever its config actually lives --------
+
+	relConfPath=".config/sendspin/settings-daemon.json"
+
+	candidateConfigs=(
+		"$HOME/$relConfPath"
+		"/home/sendspin/$relConfPath"
+		"/root/$relConfPath"
+	)
+
+	# give the configs a bit to materialize
+	for attempt in $(seq 1 60)
+	do
+		for config in "${candidateConfigs[@]}"
+		do
+			sudo test -f "$config" && break 2
+		done
+		sleep 1
+	done
+
+
+	needsRestart=false
+
+	for config in "${candidateConfigs[@]}"
+	do
+		sudo test -f "$config" || continue
+
+		configOwner=$(sudo stat -c '%U' "$config")
+
+		if [[ "$needsRestart" == false ]]
+		then
+			sudo systemctl stop sendspin
+			needsRestart=true
+		fi
+
+		# gotta sudo as the owning user to keep file perms from going borko borko
+		sudo -u "$configOwner" bash -c \
+			"jq '.use_hardware_volume = false | .player_volume = 20' '$config' > '$config.tmp' && mv '$config.tmp' '$config'"
+	done
+
+	if [[ "$needsRestart" == true ]]
+	then
+		sudo systemctl start sendspin
+	fi
+fi
+
+# -------- raspotify daemon --------
+raspotifyConfig="/etc/raspotify/conf"
+raspotifyFreshInstall=0
+
+if ! sudo test -f "$raspotifyConfig"
+then
+	raspotifyFreshInstall=1
+fi
+
+curl -sL "$raspotifyInstallUrl"  | sh
+
+if [[ "$raspotifyFreshInstall" == 1 ]]
+then
+	# set default vol
+	sudo sed -i '/^LIBRESPOT_INITIAL_VOLUME=/d' "$raspotifyConfig"
+	echo 'LIBRESPOT_INITIAL_VOLUME="20"' | sudo tee -a "$raspotifyConfig" > /dev/null
+	sudo systemctl restart raspotify
+fi
+
+# -------- pink noise via mpd/mpc --------
+ambianceDir='/var/lib/mpd/music/ambient'
+pinkNoisePath="$ambianceDir/pink_noise.flac"
+mpdFreshInstall=0
+
+sudo mkdir -p "$ambianceDir"
+
+if [[ ! -f "$pinkNoisePath" ]]
+then
+	mpdFreshInstall=1
+
+	# 54000 = 15 hours
+	# enough to safely never loop overnight
+
+	# # mono pink noise
+	# sox -n -r 44100 -c 1 "$pinkNoisePath" \
+	# 	synth 54000 pinknoise vol 0.9
+
+	# seperately generated stereo channels of pink noise
+	# it's supposed to be a little more atmospheric
+	sox --combine merge \
+		"|sox -n -p -r 44100 -c 1 synth 54000 pinknoise vol 0.9" \
+		"|sox -n -p -r 44100 -c 1 synth 54000 pinknoise vol 0.9" \
+		-c 2 -r 44100 "$pinkNoisePath"	
+	sudo chown -R mpd:audio "$ambianceDir"
+fi
+
+# script to initialize mpd, so it's ready to play pink noise
+sudo curl -fsSL "$musicNodeRootUrl/scripts/mpc-pink-noise-init.sh" \
+	-o /usr/local/bin/mpc-pink-noise-init.sh
+sudo chmod +x /usr/local/bin/mpc-pink-noise-init.sh
+# service to fire mpd initialization script at boot
+sudo curl -fsSL "$musicNodeRootUrl/systemd/mpc-pink-noise-init.service" \
+	-o /etc/systemd/system/mpc-pink-noise-init.service
+# also fire the script at noon to reset the progress
+sudo curl -fsSL "$musicNodeRootUrl/systemd/mpc-pink-noise-init.timer" \
+	-o /etc/systemd/system/mpc-pink-noise-init.timer
+
+# swap in hostname before writing
+curl -fsSL "$musicNodeRootUrl/config/mpd.conf" | \
+	sed 's/${NODE_NAME}/'"$(hostname)"'/g' | \
+	sudo tee /etc/mpd.conf > /dev/null
+
+# fire away
+sudo systemctl restart mpd
+sudo systemctl daemon-reload
+sudo systemctl enable --now mpc-pink-noise-init.service
+sudo systemctl enable --now mpc-pink-noise-init.timer
+
+if [[ "$mpdFreshInstall" == 1 ]]
+then
+	# set a default volume once
+	# though this will be more decided by home assistant, generally speaking
+	mpc volume 20
+fi
+
+# -------- status check --------
+
+services=(sendspin raspotify rpi-mqtt-monitor mpd mpc-pink-noise-init)
+
+for svc in "${services[@]}"; do
+	printf "%-25s %s\n" "${svc} daemon active:" "$(systemctl is-active "$svc" || true)"
+done

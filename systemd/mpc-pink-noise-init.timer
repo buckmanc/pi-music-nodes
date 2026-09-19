@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodically reset pink noise queue when idle
+
+[Timer]
+OnCalendar=*-*-* 12:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
