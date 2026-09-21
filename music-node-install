@@ -19,10 +19,11 @@ rpiMqttMonitorInstallUrl='https://raw.githubusercontent.com/hjelev/rpi-mqtt-moni
 
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y vim curl libffi-dev python3-dev libjpeg-dev zlib1g-dev libportaudio2 libopenblas0 screen mpd sox mpc alsa-utils jq
+sudo apt install -y pipewire pipewire-pulse pipewire-alsa wireplumber
 
-# dmix config to allow sound to play from multiple sources
-sudo curl -fsSL "$musicNodeRootUrl/config/asound.conf" \
-	-o /etc/asound.conf
+# start a dummy session for mpd user on boot
+# required for headless audio under pipewire
+sudo loginctl enable-linger mpd
 
 # hardware volume
 # setting the default high so the software volumes can be set lower and still have headroom
@@ -46,7 +47,7 @@ then
 	uv tool upgrade sendspin
 	sudo systemctl restart sendspin
 else
-	# slap " | cat" on the end to make it run in non-interactive mode
+	echo 'when prompted, have sendspin run as user "mpd"'
 	curl -fsSL "$sendspinInstallUrl" | sudo bash
 
 	# -------- force sendspin to software volume, wherever its config actually lives --------
@@ -54,6 +55,8 @@ else
 	relConfPath=".config/sendspin/settings-daemon.json"
 
 	candidateConfigs=(
+		"/var/lib/mpd/$relConfPath"
+		"/home/mpd/$relConfPath"
 		"$HOME/$relConfPath"
 		"/home/sendspin/$relConfPath"
 		"/root/$relConfPath"
@@ -108,10 +111,19 @@ curl -sL "$raspotifyInstallUrl"  | sh
 
 if [[ "$raspotifyFreshInstall" == 1 ]]
 then
-	# set default vol
-	sudo sed -i '/^LIBRESPOT_INITIAL_VOLUME=/d' "$raspotifyConfig"
-	echo 'LIBRESPOT_INITIAL_VOLUME="20"' | sudo tee -a "$raspotifyConfig" > /dev/null
+	# change raspotify service user to match the others
+	sudo curl -fsSL --create-dirs \
+		"$musicNodeRootUrl/systemd/raspotify_override.conf" \
+		-o /etc/systemd/system/raspotify.service.d/override.conf
+
+	# set default vol and backend to pulse
+	sudo sed -i '/^LIBRESPOT_INITIAL_VOLUME=/d'	"$raspotifyConfig"
+	sudo sed -i '/^LIBRESPOT_BACKEND=/d'		"$raspotifyConfig"
+	echo 'LIBRESPOT_INITIAL_VOLUME="20"'	| sudo tee -a "$raspotifyConfig" > /dev/null
+	echo 'LIBRESPOT_BACKEND="pulseaudio"'	| sudo tee -a "$raspotifyConfig" > /dev/null
+	sudo systemctl daemon-reload
 	sudo systemctl restart raspotify
+
 fi
 
 # -------- pink noise via mpd/mpc --------
@@ -142,7 +154,7 @@ then
 	# 	"|sox -n -p -r 44100 -c 1 synth 54000 pinknoise vol 0.9" \
 	# 	"|sox -n -p -r 44100 -c 1 synth 54000 pinknoise vol 0.9" \
 	# 	-c 2 -r 44100 "$pinkNoisePath"	
-	# sudo chown -R mpd:audio "$ambianceDir"
+	sudo chown -R mpd:audio "$ambianceDir"
 fi
 
 # script to initialize mpd, so it's ready to play pink noise
