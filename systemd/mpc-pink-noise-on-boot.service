@@ -1,0 +1,12 @@
+[Unit]
+Description=Start MPD playback on boot
+After=mpc-pink-noise-init.service
+Requires=mpc-pink-noise-init.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/mpc play
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

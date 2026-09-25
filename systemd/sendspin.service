@@ -7,8 +7,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=mpd
-Environment=XDG_RUNTIME_DIR=/run/user/{MPD_ID}
-ExecStart={SENDSPIN_PATH} daemon
+Environment=XDG_RUNTIME_DIR=/run/user/${MPD_ID}
+ExecStart=${SENDSPIN_PATH} daemon
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -17,3 +17,6 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target

@@ -13,11 +13,17 @@
 
 set -e
 
+# 54000 = 15 hours
+# enough to safely never loop overnight
+pinkNoiseTargetLength=54000
+pinkNoiseTempLength=60
+
 musicNodeRootGitUrl='https://github.com/buckmanc/pi-music-nodes'
 musicNodeTempPath="${TMPDIR:-/tmp}/pi-music-nodes"
 uvInstallUrl='https://astral.sh/uv/install.sh'
 raspotifyInstallUrl='https://raw.githubusercontent.com/dtcooper/raspotify/refs/heads/master/install.sh'
 rpiMqttMonitorInstallUrl='https://raw.githubusercontent.com/hjelev/rpi-mqtt-monitor/master/remote_install.sh'
+uvPath="/var/lib/mpd/.local/bin/uv"
 
 # add mkdir -p behaviour to cp
 mkcp() {
@@ -39,16 +45,24 @@ sed -i 's/${MPD_ID}/'"$(id --user mpd)"'/g' "$musicNodeTempPath/systemd/"*
 mkcp "$musicNodeTempPath/scripts/generate-pink-noise.sh" /usr/local/bin/generate-pink-noise.sh
 sudo chmod +x /usr/local/bin/generate-pink-noise.sh
 
+# copy all the systemd services over
+sudo cp "$musicNodeTempPath/systemd/"*.service "/etc/systemd/system/"
+
 # start a dummy session for mpd user on boot
 # required for headless audio under pipewire
 sudo loginctl enable-linger mpd
 
-# give pipewire a minute to spin up
+# runtimeDir="/run/user/$(id -u mpd)"
+# dbusAddress="unix:path=${runtimeDir}/bus"
+
+# give pipewire a sec to spin up
 for attempt in $(seq 1 60)
 do
 	# hardware volume
 	# setting the default high so the software volumes can be set lower and still have headroom
-	sudo -u mpd XDG_RUNTIME_DIR="/run/user/$(id -u mpd)" wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% && break
+	# sudo -u mpd XDG_RUNTIME_DIR="$runtimeDir" DBUS_SESSION_BUS_ADDRESS="$dbusAddress" wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% && break
+	wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% && break
+	
 	sleep 1
 done
 
@@ -67,19 +81,18 @@ mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/sendspin.ser
 
 if sudo -u mpd test -x /var/lib/mpd/.local/bin/sendspin
 then
-	sudo -u mpd bash -c "uv tool upgrade sendspin"
+	sudo -u mpd bash -c "$uvPath tool upgrade sendspin"
 	sudo systemctl restart sendspin
 else
 
 	# install uv and sendspin as the mpd user
 	sudo -u mpd bash -c "curl -LsSf '$uvInstallUrl' | sh"
-	sudo -u mpd bash -c "uv tool install sendspin"
+	sudo -u mpd bash -c "$uvPath tool install sendspin"
 
-	sendspinBin=$(sudo -u mpd bash -c "uv tool dir --bin")/sendspin
+	sendspinBin=$(sudo -u mpd bash -c "$uvPath tool dir --bin")/sendspin
 
-	# install the service
-	sed -i 's|${SENDSPIN_PATH}|'"$sendspinBin"'|g' "$musicNodeTempPath/systemd/sendspin.service"
-	mkcp "$musicNodeTempPath/systemd/sendspin.service" "/etc/systemd/system/sendspin.service"
+	# make sure the sendspin service has the path to the binary
+	sed -i 's|\${SENDSPIN_PATH}|'"$sendspinBin"'|g' "/etc/systemd/system/sendspin.service"
 
 	# restart to make sure the newly installed service meshes with the override
 	sudo systemctl daemon-reload
@@ -120,9 +133,35 @@ else
 			needsRestart=true
 		fi
 
+		spinMan="$(jq -r  '.manufacturer' "$config")"
+		# product name defaults to a useful OS string if empty
+		# spinProd="$(jq -r '.product_name' "$config")"
+
+		if [[ "$spinMan" == "null" ]]
+		then
+			modelNamePaths=('/proc/device-tree/model' '/sys/devices/virtual/dmi/id/product_name')
+			for path in "${modelNamePaths[@]}"
+			do
+				if [[ -f "$path" ]]
+				then
+					spinMan="$(cat "$path")"
+					break
+				fi
+			done
+		fi
+
+		# fallback
+		if [[ "$spinMan" == "null" ]]
+		then
+			spinMan="openvoid.org"
+		fi
+
+		# wrap in double quotes for jq
+		spinMan='"'"$spinMan"'"'
+
 		# gotta sudo as the owning user to keep file perms from going borko borko
 		sudo -u "$configOwner" bash -c \
-			"jq '.use_hardware_volume = false | .player_volume = 20' '$config' > '$config.tmp' && mv '$config.tmp' '$config'"
+			"jq '.use_hardware_volume = false | .player_volume = 20 | .manufacturer = $spinMan'  '$config' > '$config.tmp' && mv '$config.tmp' '$config'"
 	done
 
 	if [[ "$needsRestart" == true ]]
@@ -168,11 +207,8 @@ if [[ ! -f "$pinkNoisePath" ]]
 then
 	mpdFreshInstall=1
 
-	# 54000 = 15 hours
-	# enough to safely never loop overnight
-
 	# generate a placeholder pink noise file, full one comes later
-	sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" 60
+	sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" "$pinkNoiseTempLength"
 fi
 
 mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpd.service.d/override.conf
@@ -180,10 +216,6 @@ mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpd.service.
 # script to initialize mpd, so it's ready to play pink noise
 mkcp "$musicNodeTempPath/scripts/mpc-pink-noise-init.sh" /usr/local/bin/mpc-pink-noise-init.sh
 sudo chmod +x /usr/local/bin/mpc-pink-noise-init.sh
-# service to fire mpd initialization script at boot
-mkcp "$musicNodeTempPath/systemd/mpc-pink-noise-init.service" /etc/systemd/system/mpc-pink-noise-init.service
-# also fire the script at noon to reset the progress
-mkcp "$musicNodeTempPath/systemd/mpc-pink-noise-init.timer" /etc/systemd/system/mpc-pink-noise-init.timer
 
 # swap in hostname before writing
 mkcp "$musicNodeTempPath/config/mpd.conf" /etc/mpd.conf
@@ -207,13 +239,24 @@ services=(sendspin raspotify rpi-mqtt-monitor mpd mpc-pink-noise-init)
 
 echo 'checking daemon statuses:'
 for svc in "${services[@]}"; do
+	# make sure everything is enabled too
+	# ignore standard output but allow error messages
+	sudo systemctl enable "$svc" > /dev/null
 	printf "%-25s %s\n" "${svc}:" "$(systemctl is-active "$svc" || true)"
 done
 
-# Generate full pink noise file (15 hours = 54000 seconds)
-if [[ "$mpdFreshInstall" == 1 ]]
+if [[ -s "$pinkNoisePath" ]]
 then
+	pinkNoiseCurrentLength="$(soxi -D "$pinkNoisePath")"
+	pinkNoiseCurrentLength="${pinkNoiseCurrentLength%%.*}"
+else
+	pinkNoiseCurrentLength=0
+fi
+
+if [[ "$pinkNoiseCurrentLength" -lt "$pinkNoiseTargetLength" ]]
+then
+	echo
 	echo 'your pi music node is now set up and ready to use'
 	echo 'next comes pink noise generation, which will take very roughly another hour'
-	sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" 54000
+	time sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" "$pinkNoiseTargetLength"
 fi
