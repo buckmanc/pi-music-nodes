@@ -9,7 +9,6 @@
 
 # TODO add a wrapper script that fires off updates / installs on a known list of pis
 # will still have to manually check in on it tho
-# TODO consider more deeply the update path: what should be copied afresh every time?
 
 set -e
 
@@ -19,16 +18,99 @@ pinkNoiseTargetLength=54000
 pinkNoiseTempLength=60
 
 musicNodeRootGitUrl='https://github.com/buckmanc/pi-music-nodes'
-musicNodeTempPath="${TMPDIR:-/tmp}/pi-music-nodes"
 uvInstallUrl='https://astral.sh/uv/install.sh'
 raspotifyInstallUrl='https://raw.githubusercontent.com/dtcooper/raspotify/refs/heads/master/install.sh'
 rpiMqttMonitorInstallUrl='https://raw.githubusercontent.com/hjelev/rpi-mqtt-monitor/master/remote_install.sh'
-uvPath="/var/lib/mpd/.local/bin/uv"
+
+homeDir="/var/lib/mpd"
+musicNodeTempPath="${TMPDIR:-/tmp}/pi-music-nodes"
+uvPath="$homeDir/.local/bin/uv"
+sendspinPath="$homeDir/.local/bin/sendspin"
+raspotifyConfig="/etc/raspotify/conf"
+sendspinConfig="$homeDir/.config/sendspin/settings-daemon.json"
+repoSendspinConfig="$musicNodeTempPath/config/sendspin-settings-daemon.json"
 
 # add mkdir -p behaviour to cp
 mkcp() {
-	sudo mkdir -p "$(dirname "$2")" && sudo cp "$1" "$2"
+	src="$1"
+	dest="$2"
+	destExt="${dest##*.}"
+
+	sudo mkdir -p "$(dirname "$dest")" && sudo cp "$src" "$dest"
+	if [[ "$destExt" == "sh" ]]
+	then
+		sudo chmod +x "$dest"
+	fi
 }
+
+# merge JSON configs: only overwrite null values in base with values from overlay
+# preserves existing non-null values, adds new keys, recurses into objects
+merge_json_configs() {
+	local base_file="$1"
+	local overlay_file="$2"
+	local tmp_file="${base_file}.tmp"
+
+	jq -s '
+		def deep_merge($new):
+			reduce ($new | keys_unsorted[]) as $k (
+				.;
+				if .[$k] == null then
+					.[$k] = $new[$k]
+				elif (.[$k] | type) == "object" and ($new[$k] | type) == "object" then
+					.[$k] = (.[$k] | deep_merge($new[$k]))
+				else
+					.
+				end
+			);
+		.[0] | deep_merge(.[1])
+	' "$base_file" "$overlay_file" > "$tmp_file" && mv "$tmp_file" "$base_file"
+}
+
+getManufacturer() {
+
+	modelNamePaths=('/proc/device-tree/model' '/sys/devices/virtual/dmi/id/product_name')
+	for path in "${modelNamePaths[@]}"
+	do
+		if [[ -f "$path" ]]
+		then
+			devMan="$(cat "$path" | tr -d '\0')"
+			break
+		fi
+	done
+
+	echo "${devMan:-openvoid.org}"
+}
+
+if [[ "$EUID" -eq 0 ]]
+then
+	echo "heavens to betsy, don't run this script with sudo!"
+	exit 1
+fi
+
+echo "let's riggidy roll"
+if ! sudo -v
+then
+	echo "we need sudo to riggidy roll :("
+	exit 1
+fi
+
+read -p "Would you like to enable pink noise on boot? (y/n) " -n 1 -r
+echo
+if [[ "$REPLY" =~ ^[Yy]$ ]]
+then
+	optPinkNoiseOnBoot=1
+else
+	optPinkNoiseOnBoot=0
+fi
+
+read -p "Would you like to enable rpi-mqtt-monitor? You'll need your mqtt credentials. (y/n) " -n 1 -r
+echo
+if [[ "$REPLY" =~ ^[Yy]$ ]]
+then
+	optMqttMonitor=1
+else
+	optMqttMonitor=0
+fi
 
 # update and install dependencies
 sudo apt update && sudo apt upgrade -y
@@ -37,31 +119,64 @@ sudo apt install -y vim curl libffi-dev python3-dev libjpeg-dev zlib1g-dev libpo
 echo "cloning to temp dir..."
 rm -rf "$musicNodeTempPath"
 git clone "$musicNodeRootGitUrl" "$musicNodeTempPath"
+
 # swap in local vars
+deviceManufacturer="$(getManufacturer)"
+mpdUid="$(id --user mpd)"
 sed -i 's/${NODE_NAME}/'"$(hostname)"'/g' "$musicNodeTempPath/config/mpd.conf"
-sed -i 's/${MPD_ID}/'"$(id --user mpd)"'/g' "$musicNodeTempPath/systemd/"*
+sed -i 's/${MPD_UID}/'"$mpdUid"'/g' "$musicNodeTempPath/systemd/"*
+sed -i 's|\${SENDSPIN_PATH}|'"$sendspinPath"'|g' "$musicNodeTempPath/systemd/"*
+jq --arg devMan "$deviceManufacturer" '.manufacturer = $devMan' "$repoSendspinConfig" \
+	> "$repoSendspinConfig.tmp" && mv "$repoSendspinConfig.tmp" "$repoSendspinConfig"
 
-# install generate-pink-noise script early so we can use it for placeholder
+# if the sendspin config already exists, merge our files only overwriting nulls
+if [[ -f "$sendspinConfig" ]]
+then
+	merge_json_configs "$sendspinConfig" "$repoSendspinConfig"
+else
+	mkcp "$repoSendspinConfig" "$sendspinConfig"
+fi
+
+# install scripts
 mkcp "$musicNodeTempPath/scripts/generate-pink-noise.sh" /usr/local/bin/generate-pink-noise.sh
-sudo chmod +x /usr/local/bin/generate-pink-noise.sh
+mkcp "$musicNodeTempPath/scripts/mpc-pink-noise-init.sh" /usr/local/bin/mpc-pink-noise-init.sh
 
-# copy all the systemd services over
+# install configs
+mkcp "$musicNodeTempPath/config/mpd.conf" /etc/mpd.conf
+
+# install services
 sudo cp "$musicNodeTempPath/systemd/"*.service "/etc/systemd/system/"
+sudo cp "$musicNodeTempPath/systemd/"*.timer "/etc/systemd/system/"
+
+# install service overrides
+mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/sendspin.service.d/override.conf
+mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/raspotify.service.d/override.conf
+mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpd.service.d/override.conf
+mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpc-pink-noise-init.service.d/override.conf
+mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpc-pink-noise-on-boot.service.d/override.conf
+
+# all services are enabled and started at the end
+# so there's no need to do so mid stream unless we need config files written or reloaded
 
 # start a dummy session for mpd user on boot
 # required for headless audio under pipewire
 sudo loginctl enable-linger mpd
 
-# runtimeDir="/run/user/$(id -u mpd)"
-# dbusAddress="unix:path=${runtimeDir}/bus"
+runtimeDir="/run/user/$mpdUid"
+dbusAddress="unix:path=${runtimeDir}/bus"
 
 # give pipewire a sec to spin up
+# mpd service should be running now due to apt install mpd
 for attempt in $(seq 1 60)
 do
+	# silence shellcheck warning
+	echo "$attempt" > /dev/null
 	# hardware volume
 	# setting the default high so the software volumes can be set lower and still have headroom
-	# sudo -u mpd XDG_RUNTIME_DIR="$runtimeDir" DBUS_SESSION_BUS_ADDRESS="$dbusAddress" wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% && break
-	wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% && break
+	# wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% && break
+	if sudo -u mpd XDG_RUNTIME_DIR="$runtimeDir" DBUS_SESSION_BUS_ADDRESS="$dbusAddress" wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% 2>/dev/null; then
+		break
+	fi
 	
 	sleep 1
 done
@@ -72,106 +187,33 @@ if (type rpi-mqtt-monitor 2>/dev/null)
 then
 	rpi-mqtt-monitor --update
 else
-	bash <(curl -s "$rpiMqttMonitorInstallUrl")
+	if [[ "$optMqttMonitor" == 1 ]]
+	then
+		bash <(curl -s "$rpiMqttMonitorInstallUrl")
+	fi
 fi
 
-
 # -------- sendspin daemon --------
-mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/sendspin.service.d/override.conf
 
-if sudo -u mpd test -x /var/lib/mpd/.local/bin/sendspin
+# install / update uv
+if sudo -u mpd test -x "$uvPath"
+then
+	sudo -u mpd "$uvPath" self update
+else
+	sudo -u mpd bash -c "curl -LsSf '$uvInstallUrl' | sh"
+fi
+
+# install / update sendspin
+if sudo -u mpd test -x "$sendspinPath"
 then
 	sudo -u mpd bash -c "$uvPath tool upgrade sendspin"
 	sudo systemctl restart sendspin
 else
-
-	# install uv and sendspin as the mpd user
-	sudo -u mpd bash -c "curl -LsSf '$uvInstallUrl' | sh"
+	# install sendspin as the mpd user
 	sudo -u mpd bash -c "$uvPath tool install sendspin"
-
-	sendspinBin=$(sudo -u mpd bash -c "$uvPath tool dir --bin")/sendspin
-
-	# make sure the sendspin service has the path to the binary
-	sed -i 's|\${SENDSPIN_PATH}|'"$sendspinBin"'|g' "/etc/systemd/system/sendspin.service"
-
-	# restart to make sure the newly installed service meshes with the override
-	sudo systemctl daemon-reload
-	sudo systemctl restart sendspin
-
-	# -------- force sendspin to software volume, wherever its config actually lives --------
-
-	relConfPath=".config/sendspin/settings-daemon.json"
-
-	candidateConfigs=(
-		"/var/lib/mpd/$relConfPath"
-		"/home/mpd/$relConfPath"
-		"$HOME/$relConfPath"
-		"/root/$relConfPath"
-	)
-
-	# give the configs a bit to materialize
-	for attempt in $(seq 1 60)
-	do
-		for config in "${candidateConfigs[@]}"
-		do
-			sudo test -f "$config" && break 2
-		done
-		sleep 1
-	done
-
-	needsRestart=false
-
-	for config in "${candidateConfigs[@]}"
-	do
-		sudo test -f "$config" || continue
-
-		configOwner=$(sudo stat -c '%U' "$config")
-
-		if [[ "$needsRestart" == false ]]
-		then
-			sudo systemctl stop sendspin
-			needsRestart=true
-		fi
-
-		spinMan="$(jq -r  '.manufacturer' "$config")"
-		# product name defaults to a useful OS string if empty
-		# spinProd="$(jq -r '.product_name' "$config")"
-
-		if [[ "$spinMan" == "null" ]]
-		then
-			modelNamePaths=('/proc/device-tree/model' '/sys/devices/virtual/dmi/id/product_name')
-			for path in "${modelNamePaths[@]}"
-			do
-				if [[ -f "$path" ]]
-				then
-					spinMan="$(cat "$path")"
-					break
-				fi
-			done
-		fi
-
-		# fallback
-		if [[ "$spinMan" == "null" ]]
-		then
-			spinMan="openvoid.org"
-		fi
-
-		# wrap in double quotes for jq
-		spinMan='"'"$spinMan"'"'
-
-		# gotta sudo as the owning user to keep file perms from going borko borko
-		sudo -u "$configOwner" bash -c \
-			"jq '.use_hardware_volume = false | .player_volume = 20 | .manufacturer = $spinMan'  '$config' > '$config.tmp' && mv '$config.tmp' '$config'"
-	done
-
-	if [[ "$needsRestart" == true ]]
-	then
-		sudo systemctl start sendspin
-	fi
 fi
 
 # -------- raspotify daemon --------
-raspotifyConfig="/etc/raspotify/conf"
 raspotifyFreshInstall=0
 
 if ! sudo test -f "$raspotifyConfig"
@@ -180,8 +222,6 @@ then
 fi
 
 curl -sL "$raspotifyInstallUrl"  | sh
-# change raspotify service user to match the others
-mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/raspotify.service.d/override.conf
 
 if [[ "$raspotifyFreshInstall" == 1 ]]
 then
@@ -192,7 +232,7 @@ then
 	echo 'LIBRESPOT_INITIAL_VOLUME="20"'	| sudo tee -a "$raspotifyConfig" > /dev/null
 	echo 'LIBRESPOT_BACKEND="pulseaudio"'	| sudo tee -a "$raspotifyConfig" > /dev/null
 
-	sudo systemctl daemon-reload
+	# reload with the new raspotify config
 	sudo systemctl restart raspotify
 fi
 
@@ -211,37 +251,36 @@ then
 	sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" "$pinkNoiseTempLength"
 fi
 
-mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpd.service.d/override.conf
-
-# script to initialize mpd, so it's ready to play pink noise
-mkcp "$musicNodeTempPath/scripts/mpc-pink-noise-init.sh" /usr/local/bin/mpc-pink-noise-init.sh
-sudo chmod +x /usr/local/bin/mpc-pink-noise-init.sh
-
-# swap in hostname before writing
-mkcp "$musicNodeTempPath/config/mpd.conf" /etc/mpd.conf
-
-# fire away
-sudo systemctl daemon-reload
-sudo systemctl restart mpd
-sudo systemctl enable --now mpc-pink-noise-init.service
-sudo systemctl enable --now mpc-pink-noise-init.timer
-
 if [[ "$mpdFreshInstall" == 1 ]]
 then
 	# set a default volume once
 	# though this will be more decided by home assistant, generally speaking
+	# safe to run now as apt install mpd starts the service already
 	mpc volume 20
 fi
 
 # -------- status check --------
 
-services=(sendspin raspotify rpi-mqtt-monitor mpd mpc-pink-noise-init)
+services=(sendspin raspotify mpd mpc-pink-noise-init mpc-pink-noise-init.timer)
+if [[ "$optPinkNoiseOnBoot" == 1 ]]
+then
+	services+=(mpc-pink-noise-on-boot)
+fi
+
+if [[ "$optMqttMonitor" == 1 ]]
+then
+	services+=(rpi-mqtt-monitor)
+fi
+
+# pick up all service file changes
+sudo systemctl daemon-reload
 
 echo 'checking daemon statuses:'
+
 for svc in "${services[@]}"; do
 	# make sure everything is enabled too
 	# ignore standard output but allow error messages
-	sudo systemctl enable "$svc" > /dev/null
+	sudo systemctl enable --now "$svc" > /dev/null
 	printf "%-25s %s\n" "${svc}:" "$(systemctl is-active "$svc" || true)"
 done
 
@@ -253,10 +292,14 @@ else
 	pinkNoiseCurrentLength=0
 fi
 
+echo
+echo 'your pi music node is now set up and ready to use'
+
+# TODO check if remaining drive space is too small for pink noise
+
 if [[ "$pinkNoiseCurrentLength" -lt "$pinkNoiseTargetLength" ]]
 then
 	echo
-	echo 'your pi music node is now set up and ready to use'
 	echo 'next comes pink noise generation, which will take very roughly another hour'
 	time sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" "$pinkNoiseTargetLength"
 fi

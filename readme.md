@@ -23,3 +23,8 @@ curl -fsSL https://raw.githubusercontent.com/buckmanc/pi-music-nodes/main/music-
 - add [Linux Voice Assistant](https://github.com/OHF-Voice/linux-voice-assistant)
 - add some kinda shitty web dashboard?
 - shorter curl url?
+- wrapper for simultaneous updates on multiple pis
+- install guide
+    - basic pi setup
+    - mqtt prep
+- screenshots

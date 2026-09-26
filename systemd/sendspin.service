@@ -1,4 +1,3 @@
-# /etc/systemd/system/sendspin.service
 [Unit]
 Description=Sendspin Multi-Room Audio Client
 After=network-online.target sound.target
@@ -7,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=mpd
-Environment=XDG_RUNTIME_DIR=/run/user/${MPD_ID}
+Environment=XDG_RUNTIME_DIR=/run/user/${MPD_UID}
 ExecStart=${SENDSPIN_PATH} daemon
 Restart=on-failure
 RestartSec=10
@@ -15,7 +14,6 @@ StandardOutput=journal
 StandardError=journal
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
 SupplementaryGroups=audio
 
 [Install]

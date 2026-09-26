@@ -19,8 +19,10 @@ outputFileNameFull="$(basename "$output_file")"
 # outputExt="${outputFileNameFull##*.}"
 
 # Create temp file in same directory as output for atomic move
-# tempTempDir="${outputDir}/tmp/"
-# mkdir -p "$tempTempDir"
+# /tmp cannot be used as it has lower than necessary size limits
+tempTempDir="${outputDir}/tmp/"
+mkdir -p "$tempTempDir"
+tempFileName="$tempTempDir/$outputFileNameFull"
 
 # Generate stereo pink noise
 # generates a ~13 GB file for 15 hours of pink noise
@@ -29,10 +31,15 @@ outputFileNameFull="$(basename "$output_file")"
 sox --combine merge \
     "|sox -n -r 44100 -c 1 -p synth ${duration} pinknoise vol 0.9" \
     "|sox -n -r 44100 -c 1 -p synth ${duration} pinknoise vol 0.9" \
-    -c 2 -r 44100 "$output_file"
+    -c 2 -r 44100 "$tempFileName"
 
 # mono version
-# sox -n -r 44100 -c 1 -p synth ${duration} pinknoise vol 0.9 "$output_file"
+# sox -n -r 44100 -c 1 -p synth ${duration} pinknoise vol 0.9 "$tempFileName"
+
+# move to final destination
+# mpd docs indicate that with auto_update set it *should* be safe to overwrite a playing file
+# it will play the old version which is locked, then when it loops it'll update the database, play the new one, and release the old one
+mv "$tempFileName" "$output_file" && rm -rf "$tempTempDir"
 
 (cd "$outputDir" && ls -sh "$outputFileNameFull")
 

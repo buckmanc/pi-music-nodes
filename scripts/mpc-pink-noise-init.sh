@@ -20,4 +20,3 @@ mpc single on
 mpc clear
 mpc add ambient/pink_noise.flac
 mpc pause
-
