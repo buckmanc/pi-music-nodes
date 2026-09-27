@@ -7,7 +7,7 @@
 # ssh nes-pi
 # curl myscript | bash
 
-# TODO add a wrapper script that fires off updates / installs on a known list of pis
+# TODO add a wrapper script that fires off updates / installs on a known list of pis, using the pattern found above
 # will still have to manually check in on it tho
 
 set -e
@@ -16,6 +16,9 @@ set -e
 # enough to safely never loop overnight
 pinkNoiseTargetLength=54000
 pinkNoiseTempLength=60
+
+optPinkNoiseOnBoot=0
+optMqttMonitor=0
 
 musicNodeRootGitUrl='https://github.com/buckmanc/pi-music-nodes'
 uvInstallUrl='https://astral.sh/uv/install.sh'
@@ -51,19 +54,23 @@ merge_json_configs() {
 	local tmp_file="${base_file}.tmp"
 
 	jq -s '
-		def deep_merge($new):
-			reduce ($new | keys_unsorted[]) as $k (
-				.;
-				if .[$k] == null then
-					.[$k] = $new[$k]
-				elif (.[$k] | type) == "object" and ($new[$k] | type) == "object" then
-					.[$k] = (.[$k] | deep_merge($new[$k]))
-				else
-					.
-				end
-			);
-		.[0] | deep_merge(.[1])
-	' "$base_file" "$overlay_file" > "$tmp_file" && mv "$tmp_file" "$base_file"
+		def deepmerge($a; $b):
+		  if ($a|type) == "object" and ($b|type) == "object" then
+			reduce ($a|keys_unsorted[]) as $k
+			  ({};
+				. + { ($k): (
+				  if $a[$k] == null then $b[$k]
+				  elif ($a[$k]|type) == "object" and ($b[$k]|type) == "object" then deepmerge($a[$k]; $b[$k])
+				  else $a[$k]
+				  end
+				)}
+			  )
+			  + (reduce ($b|keys_unsorted[] - $a|keys_unsorted[]) as $k (.; . + {($k): $b[$k]}))
+		  elif $a == null then $b
+		  else $a
+		  end;
+		deepmerge(.[0]; .[1])
+	' "$base_file" "$overlay_file" | sudo tee "$tmp_file" >/dev/null && sudo mv "$tmp_file" "$base_file"
 }
 
 getManufacturer() {
@@ -94,27 +101,36 @@ then
 	exit 1
 fi
 
-read -p "Would you like to enable pink noise on boot? (y/n) " -n 1 -r
-echo
-if [[ "$REPLY" =~ ^[Yy]$ ]]
+# this is gonna ask every time, that's pretty annoying
+# but I guess it probably should. we won't be running this every day, after all
+if systemctl is-active --quiet "mpc-pink-noise-on-boot" && [[ "$REPLY" =~ ^[Yy]$ ]]
 then
-	optPinkNoiseOnBoot=1
-else
-	optPinkNoiseOnBoot=0
+	read -p "Would you like to enable pink noise on boot? (y/n) " -n 1 -r
+	echo
+	if [[ "$REPLY" =~ ^[Yy]$ ]]
+	then
+		optPinkNoiseOnBoot=1
+	fi
 fi
 
-read -p "Would you like to enable rpi-mqtt-monitor? You'll need your mqtt credentials. (y/n) " -n 1 -r
-echo
-if [[ "$REPLY" =~ ^[Yy]$ ]]
+if (! type rpi-mqtt-monitor > /dev/null 2>&1)
 then
-	optMqttMonitor=1
-else
-	optMqttMonitor=0
+	read -p "Would you like to enable rpi-mqtt-monitor? You'll need your mqtt credentials. (y/n) " -n 1 -r
+	echo
+	if [[ "$REPLY" =~ ^[Yy]$ ]]
+	then
+		optMqttMonitor=1
+	fi
 fi
 
 # update and install dependencies
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y vim curl libffi-dev python3-dev libjpeg-dev zlib1g-dev libportaudio2 libopenblas0 mpd sox mpc alsa-utils jq pipewire pipewire-pulse pipewire-alsa wireplumber git python3-pip python3-wheel python3-packaging smartmontools
+echo
+echo 'Updating...'
+sudo apt-get update -qq && sudo apt-get upgrade -yq
+sudo apt-get install -y vim curl libffi-dev python3-dev libjpeg-dev zlib1g-dev libportaudio2 libopenblas0 mpd sox mpc alsa-utils jq pipewire pipewire-pulse pipewire-alsa wireplumber git python3-pip python3-wheel python3-packaging smartmontools
+
+# mpd service is needed a few times in here
+sudo systemctl start mpd
 
 echo "cloning to temp dir..."
 rm -rf "$musicNodeTempPath"
@@ -133,8 +149,10 @@ jq --arg devMan "$deviceManufacturer" '.manufacturer = $devMan' "$repoSendspinCo
 if [[ -f "$sendspinConfig" ]]
 then
 	merge_json_configs "$sendspinConfig" "$repoSendspinConfig"
+	sudo chown -R mpd:audio "$homeDir/.config"
 else
 	mkcp "$repoSendspinConfig" "$sendspinConfig"
+	sudo chown -R mpd:audio "$homeDir/.config"
 fi
 
 # install scripts
@@ -166,7 +184,6 @@ runtimeDir="/run/user/$mpdUid"
 dbusAddress="unix:path=${runtimeDir}/bus"
 
 # give pipewire a sec to spin up
-# mpd service should be running now due to apt install mpd
 for attempt in $(seq 1 60)
 do
 	# silence shellcheck warning
@@ -177,7 +194,7 @@ do
 	if sudo -u mpd XDG_RUNTIME_DIR="$runtimeDir" DBUS_SESSION_BUS_ADDRESS="$dbusAddress" wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% 2>/dev/null; then
 		break
 	fi
-	
+
 	sleep 1
 done
 
@@ -189,6 +206,8 @@ then
 else
 	if [[ "$optMqttMonitor" == 1 ]]
 	then
+		# smartmontools enables itself by default, but the rpi-mqtt-monitor installer may still warn about it
+		# on pis it tends to fail due to "no devices to monitor"
 		bash <(curl -s "$rpiMqttMonitorInstallUrl")
 	fi
 fi
@@ -255,19 +274,19 @@ if [[ "$mpdFreshInstall" == 1 ]]
 then
 	# set a default volume once
 	# though this will be more decided by home assistant, generally speaking
-	# safe to run now as apt install mpd starts the service already
-	mpc volume 20
+	mpc volume 20 > /dev/null
 fi
 
 # -------- status check --------
 
 services=(sendspin raspotify mpd mpc-pink-noise-init mpc-pink-noise-init.timer)
-if [[ "$optPinkNoiseOnBoot" == 1 ]]
+
+if systemctl is-active --quiet "mpc-pink-noise-on-boot" || [[ "$optPinkNoiseOnBoot" == 1 ]]
 then
 	services+=(mpc-pink-noise-on-boot)
 fi
 
-if [[ "$optMqttMonitor" == 1 ]]
+if systemctl is-active --quiet "rpi-mqtt-monitor" || [[ "$optMqttMonitor" == 1 ]]
 then
 	services+=(rpi-mqtt-monitor)
 fi
@@ -280,7 +299,7 @@ echo 'checking daemon statuses:'
 for svc in "${services[@]}"; do
 	# make sure everything is enabled too
 	# ignore standard output but allow error messages
-	sudo systemctl enable --now "$svc" > /dev/null
+	sudo systemctl enable --now "$svc" --quiet
 	printf "%-25s %s\n" "${svc}:" "$(systemctl is-active "$svc" || true)"
 done
 
@@ -295,11 +314,34 @@ fi
 echo
 echo 'your pi music node is now set up and ready to use'
 
-# TODO check if remaining drive space is too small for pink noise
+# -------- big pink noise generation --------
 
+# check if remaining drive space is too small for pink noise and ask if the user wants to generate the full file
 if [[ "$pinkNoiseCurrentLength" -lt "$pinkNoiseTargetLength" ]]
 then
+	# Check available disk space (in KB)
+	available_kb=$(df "$ambianceDir" --output=avail -k)
+	# Estimate needed space: ~13GB for 15 hours of pink noise FLAC
+	needed_kb=$((13 * 1024 * 1024))  # 13GB in KB
+
+	if [[ $available_kb -lt $needed_kb ]]; then
+		echo
+		echo "WARNING: Low disk space detected!"
+		echo "Available: $(($available_kb / 1024 / 1024)) GB"
+		echo "Estimated needed for full pink noise: ~13 GB"
+		echo
+		read -p "Generate full pink noise file anyway? (y/n) " -n 1 -r
+		echo
+		if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+			echo "Skipping full pink noise generation. You can run it later with:"
+			echo "  sudo /usr/local/bin/generate-pink-noise.sh $pinkNoisePath $pinkNoiseTargetLength"
+			exit 0
+		fi
+	fi
+
 	echo
-	echo 'next comes pink noise generation, which will take very roughly another hour'
+	echo 'next comes pink noise generation, which will take roughly another hour (on a Pi 3 at least)'
+	echo -n 'should be done about ' && date '+%F %R' --date '1 hour'
+
 	time sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" "$pinkNoiseTargetLength"
 fi

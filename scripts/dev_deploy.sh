@@ -15,6 +15,6 @@ rsync music-node-install "$sshName":
 sedPattern='/^(rm \-rf|git clone) "\$musicNode/d'
 
 echo 'removing git clone from deployed script...'
-ssh "$sshName" "sed -i -E \"$sedPattern\" music-node-install"
+ssh "$sshName" "sed -i -E '$sedPattern' music-node-install"
 
 echo 'done'

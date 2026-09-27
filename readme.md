@@ -4,8 +4,8 @@ Transform your Raspberry Pi into a headless music node with support for Spotify 
 
 ## Features
 
-- **Spotify Connect** via [raspotify](https://github.com/dtcooper/raspotify) - Stream directly from Spotify app
-- **Sendspin** via [sendspin-cli](https://github.com/Sendspin/sendspin-python-cli)
+- **Spotify Connect** via [raspotify](https://github.com/dtcooper/raspotify) - Stream directly from the Spotify app
+- **Sendspin** via [sendspin-cli](https://github.com/Sendspin/sendspin-python-cli) - Stream from your [Music Assistant](https://github.com/music-assistant/server)
 - **Ambient Pink Noise** via [MPD](https://github.com/musicplayerdaemon/mpd) - 15-hour stereo pink noise generated on install
 - **Home Assistant Integration** via [rpi-mqtt-monitor](https://github.com/hjelev/rpi-mqtt-monitor) - System stats, temperature, disk health
 

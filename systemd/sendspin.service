@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=mpd
 Environment=XDG_RUNTIME_DIR=/run/user/${MPD_UID}
-ExecStart=${SENDSPIN_PATH} daemon
+ExecStart=${SENDSPIN_PATH} daemon --hardware-volume false
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
