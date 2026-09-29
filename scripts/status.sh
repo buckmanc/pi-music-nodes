@@ -30,7 +30,7 @@ mpc volume
 
 echo -n "sendspin: "
 cfg="$(cat "$sendspinConfig" || true)"
-vol=$(echo "$cfg" | jq -r '.player_volume // "unknown"')
+vol=$(echo "$cfg" | jq -r '.player_volume // ""')
 if [[ -n "$vol" ]]
 then
 	echo -n "${vol}*"

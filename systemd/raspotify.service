@@ -2,8 +2,8 @@
 Description=Raspotify (Spotify Connect Client)
 Documentation=https://github.com/dtcooper/raspotify
 Documentation=https://github.com/librespot-org/librespot
-Wants=network.target sound.target
-After=network.target sound.target
+Wants=network-online.target sound.target
+After=network-online.target sound.target
 
 StartLimitIntervalSec=120s
 StartLimitBurst=6

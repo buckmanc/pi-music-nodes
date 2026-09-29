@@ -24,6 +24,8 @@ tempTempDir="${outputDir}/tmp/"
 mkdir -p "$tempTempDir"
 tempFileName="$tempTempDir/$outputFileNameFull"
 
+trap 'rm -rf "$tempTempDir"' INT TERM
+
 # Generate stereo pink noise
 # generates a ~13 GB file for 15 hours of pink noise
 # gotta leave --guardrails out as this causes double the required storage space
