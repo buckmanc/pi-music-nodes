@@ -1,0 +1,51 @@
+[Unit]
+Description=Raspotify (Spotify Connect Client)
+Documentation=https://github.com/dtcooper/raspotify
+Documentation=https://github.com/librespot-org/librespot
+Wants=network.target sound.target
+After=network.target sound.target
+
+StartLimitIntervalSec=120s
+StartLimitBurst=6
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+NoNewPrivileges=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+
+UMask=077
+CacheDirectoryMode=0700
+CacheDirectory=%N
+StateDirectoryMode=0700
+StateDirectory=%N
+ConfigurationDirectoryMode=0600
+ConfigurationDirectory=%N
+RuntimeDirectory=%N
+
+PrivateTmp=true
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+Environment=LIBRESPOT_NAME="%N (%H)"
+Environment=LIBRESPOT_BACKEND="pulseaudio"
+Environment=LIBRESPOT_INITIAL_VOLUME=40
+Environment=LIBRESPOT_CACHE=%C/%N
+Environment=LIBRESPOT_SYSTEM_CACHE=%S/%N
+Environment=TMPDIR=%t/%N
+EnvironmentFile=-%E/%N/conf
+
+ExecStart=/usr/bin/librespot
+
+[Install]
+WantedBy=default.target

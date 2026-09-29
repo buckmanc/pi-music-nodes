@@ -15,6 +15,16 @@ if mpc status | grep -q '\[playing\]'; then
 	exit 0
 fi
 
+currentVol="$(mpc volume | grep -iPo '\d+(?=%)')"
+
+# if the volume is maxxored, turn it down!
+if [[ "$currentVol" -eq 100 ]]
+then
+	mpc volume 40
+fi
+
+# "mpc add" will error the first time if you don't rescan first
+mpc rescan
 mpc repeat on
 mpc single on
 mpc clear

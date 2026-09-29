@@ -25,11 +25,11 @@ uvInstallUrl='https://astral.sh/uv/install.sh'
 raspotifyInstallUrl='https://raw.githubusercontent.com/dtcooper/raspotify/refs/heads/master/install.sh'
 rpiMqttMonitorInstallUrl='https://raw.githubusercontent.com/hjelev/rpi-mqtt-monitor/master/remote_install.sh'
 
-homeDir="/var/lib/mpd"
+homeDir="$HOME"
+scriptDir="$homeDir/.local/bin"
 musicNodeTempPath="${TMPDIR:-/tmp}/pi-music-nodes"
 uvPath="$homeDir/.local/bin/uv"
 sendspinPath="$homeDir/.local/bin/sendspin"
-raspotifyConfig="/etc/raspotify/conf"
 sendspinConfig="$homeDir/.config/sendspin/settings-daemon.json"
 repoSendspinConfig="$musicNodeTempPath/config/sendspin-settings-daemon.json"
 
@@ -39,38 +39,28 @@ mkcp() {
 	dest="$2"
 	destExt="${dest##*.}"
 
-	sudo mkdir -p "$(dirname "$dest")" && sudo cp "$src" "$dest"
+	mkdir -p "$(dirname "$dest")" && cp "$src" "$dest"
 	if [[ "$destExt" == "sh" ]]
 	then
-		sudo chmod +x "$dest"
+		chmod +x "$dest"
 	fi
 }
 
-# merge JSON configs: only overwrite null values in base with values from overlay
-# preserves existing non-null values, adds new keys, recurses into objects
 merge_json_configs() {
 	local base_file="$1"
 	local overlay_file="$2"
 	local tmp_file="${base_file}.tmp"
 
-	jq -s '
-		def deepmerge($a; $b):
-		  if ($a|type) == "object" and ($b|type) == "object" then
-			reduce ($a|keys_unsorted[]) as $k
-			  ({};
-				. + { ($k): (
-				  if $a[$k] == null then $b[$k]
-				  elif ($a[$k]|type) == "object" and ($b[$k]|type) == "object" then deepmerge($a[$k]; $b[$k])
-				  else $a[$k]
-				  end
-				)}
-			  )
-			  + (reduce ($b|keys_unsorted[] - $a|keys_unsorted[]) as $k (.; . + {($k): $b[$k]}))
-		  elif $a == null then $b
-		  else $a
-		  end;
-		deepmerge(.[0]; .[1])
-	' "$base_file" "$overlay_file" | sudo tee "$tmp_file" >/dev/null && sudo mv "$tmp_file" "$base_file"
+	jq -s '.[0] as $base | .[1] as $override | $base + ($override | with_entries(select(.value != null)))' \
+	 "$base_file" "$overlay_file" > "$tmp_file"
+
+	if [[ ! -s "$tmp_file" ]]
+	then
+		echo 'error merging in sendsoin config!' >&2
+		exit 1
+	fi
+
+	mv "$tmp_file" "$base_file"
 }
 
 getManufacturer() {
@@ -103,7 +93,7 @@ fi
 
 # this is gonna ask every time, that's pretty annoying
 # but I guess it probably should. we won't be running this every day, after all
-if systemctl is-active --quiet "mpc-pink-noise-on-boot" && [[ "$REPLY" =~ ^[Yy]$ ]]
+if ! systemctl --user is-active --quiet "mpc-pink-noise-on-boot"
 then
 	read -p "Would you like to enable pink noise on boot? (y/n) " -n 1 -r
 	echo
@@ -127,10 +117,7 @@ fi
 echo
 echo 'Updating...'
 sudo apt-get update -qq && sudo apt-get upgrade -yq
-sudo apt-get install -y vim curl libffi-dev python3-dev libjpeg-dev zlib1g-dev libportaudio2 libopenblas0 mpd sox mpc alsa-utils jq pipewire pipewire-pulse pipewire-alsa wireplumber git python3-pip python3-wheel python3-packaging smartmontools
-
-# mpd service is needed a few times in here
-sudo systemctl start mpd
+sudo apt-get install -y vim curl libffi-dev python3-dev libjpeg-dev zlib1g-dev libportaudio2 libopenblas0 mpd sox mpc alsa-utils jq pipewire pipewire-pulse pipewire-alsa wireplumber git python3-pip python3-wheel python3-packaging smartmontools pulseaudio-utils
 
 echo "cloning to temp dir..."
 rm -rf "$musicNodeTempPath"
@@ -138,65 +125,59 @@ git clone "$musicNodeRootGitUrl" "$musicNodeTempPath"
 
 # swap in local vars
 deviceManufacturer="$(getManufacturer)"
-mpdUid="$(id --user mpd)"
 sed -i 's/${NODE_NAME}/'"$(hostname)"'/g' "$musicNodeTempPath/config/mpd.conf"
-sed -i 's/${MPD_UID}/'"$mpdUid"'/g' "$musicNodeTempPath/systemd/"*
-sed -i 's|\${SENDSPIN_PATH}|'"$sendspinPath"'|g' "$musicNodeTempPath/systemd/"*
 jq --arg devMan "$deviceManufacturer" '.manufacturer = $devMan' "$repoSendspinConfig" \
 	> "$repoSendspinConfig.tmp" && mv "$repoSendspinConfig.tmp" "$repoSendspinConfig"
 
+# install configs
+mkcp "$musicNodeTempPath/config/mpd.conf" "$homeDir/.config/mpd/mpd.conf"
+mkdir -p "$homeDir/mpd"
+mkcp "$musicNodeTempPath/config/wireplumber.conf" "$homeDir/.config/wireplumber/wireplumber.conf.d/music_node_defaults.conf"
+
 # if the sendspin config already exists, merge our files only overwriting nulls
-if [[ -f "$sendspinConfig" ]]
+if [[ -s "$sendspinConfig" ]]
 then
 	merge_json_configs "$sendspinConfig" "$repoSendspinConfig"
-	sudo chown -R mpd:audio "$homeDir/.config"
 else
 	mkcp "$repoSendspinConfig" "$sendspinConfig"
-	sudo chown -R mpd:audio "$homeDir/.config"
 fi
 
 # install scripts
-mkcp "$musicNodeTempPath/scripts/generate-pink-noise.sh" /usr/local/bin/generate-pink-noise.sh
-mkcp "$musicNodeTempPath/scripts/mpc-pink-noise-init.sh" /usr/local/bin/mpc-pink-noise-init.sh
-
-# install configs
-mkcp "$musicNodeTempPath/config/mpd.conf" /etc/mpd.conf
+mkcp "$musicNodeTempPath/scripts/generate-pink-noise.sh" "$scriptDir/generate-pink-noise.sh"
+mkcp "$musicNodeTempPath/scripts/mpc-pink-noise-init.sh" "$scriptDir/mpc-pink-noise-init.sh"
 
 # install services
-sudo cp "$musicNodeTempPath/systemd/"*.service "/etc/systemd/system/"
-sudo cp "$musicNodeTempPath/systemd/"*.timer "/etc/systemd/system/"
-
-# install service overrides
-mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/sendspin.service.d/override.conf
-mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/raspotify.service.d/override.conf
-mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpd.service.d/override.conf
-mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpc-pink-noise-init.service.d/override.conf
-mkcp "$musicNodeTempPath/systemd/override.conf" /etc/systemd/system/mpc-pink-noise-on-boot.service.d/override.conf
+mkdir -p "$homeDir/.config/systemd/user"
+cp "$musicNodeTempPath/systemd/"*.service "$homeDir/.config/systemd/user/"
+cp "$musicNodeTempPath/systemd/"*.timer "$homeDir/.config/systemd/user/"
 
 # all services are enabled and started at the end
 # so there's no need to do so mid stream unless we need config files written or reloaded
 
+# wipe the static motd if it's still the default
+if grep -Piq '^The programs included with the Debian GNU/Linux system are free software' /etc/motd
+then
+	sudo truncate -s 0 /etc/motd
+fi
+
 # start a dummy session for mpd user on boot
 # required for headless audio under pipewire
-sudo loginctl enable-linger mpd
+loginctl enable-linger "$USER"
 
-runtimeDir="/run/user/$mpdUid"
-dbusAddress="unix:path=${runtimeDir}/bus"
+if ! id -nG "$USER" | grep -qw audio; then
+	sudo usermod -aG audio "$USER"
+	echo "Added $USER to the audio group — this needs a fresh login to take effect."
+	echo "Log out, log back in, and re-run this script to finish setup."
+	exit 0
+fi
 
-# give pipewire a sec to spin up
-for attempt in $(seq 1 60)
-do
-	# silence shellcheck warning
-	echo "$attempt" > /dev/null
-	# hardware volume
-	# setting the default high so the software volumes can be set lower and still have headroom
-	# wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% && break
-	if sudo -u mpd XDG_RUNTIME_DIR="$runtimeDir" DBUS_SESSION_BUS_ADDRESS="$dbusAddress" wpctl set-volume @DEFAULT_AUDIO_SINK@ 90% 2>/dev/null; then
-		break
-	fi
-
-	sleep 1
-done
+# switch the mpd service from system to user
+# the package comes with a user service file, so no shuffling there
+# gotta spin this up early so we can set defaults
+# it also triggers pipewire to spin up
+sudo systemctl disable --now mpd
+systemctl --user daemon-reload
+systemctl --user enable --now mpd
 
 # -------- remote monitoring for home assistant --------
 # this goes near the top coz it's a lot of manual questions
@@ -215,93 +196,62 @@ fi
 # -------- sendspin daemon --------
 
 # install / update uv
-if sudo -u mpd test -x "$uvPath"
+if test -x "$uvPath"
 then
-	sudo -u mpd "$uvPath" self update
+	"$uvPath" self update
 else
-	sudo -u mpd bash -c "curl -LsSf '$uvInstallUrl' | sh"
+	curl -LsSf "$uvInstallUrl" | sh
 fi
 
 # install / update sendspin
-if sudo -u mpd test -x "$sendspinPath"
+if test -x "$sendspinPath"
 then
-	sudo -u mpd bash -c "$uvPath tool upgrade sendspin"
-	sudo systemctl restart sendspin
+	"$uvPath" tool upgrade sendspin
+	systemctl --user restart sendspin
 else
-	# install sendspin as the mpd user
-	sudo -u mpd bash -c "$uvPath tool install sendspin"
+	# install sendspin
+	"$uvPath" tool install sendspin
 fi
 
 # -------- raspotify daemon --------
-raspotifyFreshInstall=0
-
-if ! sudo test -f "$raspotifyConfig"
-then
-	raspotifyFreshInstall=1
-fi
-
 curl -sL "$raspotifyInstallUrl"  | sh
 
-if [[ "$raspotifyFreshInstall" == 1 ]]
-then
-	# TODO this may be necessary on updates
-	# set default vol and backend to pulse
-	sudo sed -i '/^LIBRESPOT_INITIAL_VOLUME=/d'	"$raspotifyConfig"
-	sudo sed -i '/^LIBRESPOT_BACKEND=/d'		"$raspotifyConfig"
-	echo 'LIBRESPOT_INITIAL_VOLUME="20"'	| sudo tee -a "$raspotifyConfig" > /dev/null
-	echo 'LIBRESPOT_BACKEND="pulseaudio"'	| sudo tee -a "$raspotifyConfig" > /dev/null
-
-	# reload with the new raspotify config
-	sudo systemctl restart raspotify
-fi
+# disable the system-level service in favor of our user-level service
+sudo systemctl disable --now raspotify
 
 # -------- pink noise via mpd/mpc --------
-ambianceDir='/var/lib/mpd/music/ambient'
+ambianceDir="$homeDir/mpd/music/ambient"
 pinkNoisePath="$ambianceDir/pink_noise.flac"
-mpdFreshInstall=0
 
-sudo mkdir -p "$ambianceDir"
+mkdir -p "$ambianceDir"
 
 if [[ ! -f "$pinkNoisePath" ]]
 then
-	mpdFreshInstall=1
-
 	# generate a placeholder pink noise file, full one comes later
-	sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" "$pinkNoiseTempLength"
+	"$scriptDir/generate-pink-noise.sh" "$pinkNoisePath" "$pinkNoiseTempLength"
 fi
 
-if [[ "$mpdFreshInstall" == 1 ]]
-then
-	# set a default volume once
-	# though this will be more decided by home assistant, generally speaking
-	mpc volume 20 > /dev/null
-fi
+# -------- enable services --------
 
-# -------- status check --------
+services=(pipewire pipewire-pulse wireplumber sendspin raspotify mpd mpc-pink-noise-init mpc-pink-noise-init.timer)
 
-services=(sendspin raspotify mpd mpc-pink-noise-init mpc-pink-noise-init.timer)
-
-if systemctl is-active --quiet "mpc-pink-noise-on-boot" || [[ "$optPinkNoiseOnBoot" == 1 ]]
+if systemctl --user is-active --quiet "mpc-pink-noise-on-boot" || [[ "$optPinkNoiseOnBoot" == 1 ]]
 then
 	services+=(mpc-pink-noise-on-boot)
 fi
 
-if systemctl is-active --quiet "rpi-mqtt-monitor" || [[ "$optMqttMonitor" == 1 ]]
-then
-	services+=(rpi-mqtt-monitor)
-fi
-
 # pick up all service file changes
-sudo systemctl daemon-reload
+systemctl --user daemon-reload
 
-echo 'checking daemon statuses:'
+echo "activating services..."
 
-for svc in "${services[@]}"; do
-	# make sure everything is enabled too
-	# ignore standard output but allow error messages
-	sudo systemctl enable --now "$svc" --quiet
-	printf "%-25s %s\n" "${svc}:" "$(systemctl is-active "$svc" || true)"
+for svc in "${services[@]}"
+do
+	systemctl --user enable --now "$svc" --quiet || true
 done
+
+# report status to the user
+"$musicNodeTempPath/scripts/status.sh"
 
 if [[ -s "$pinkNoisePath" ]]
 then
@@ -320,11 +270,12 @@ echo 'your pi music node is now set up and ready to use'
 if [[ "$pinkNoiseCurrentLength" -lt "$pinkNoiseTargetLength" ]]
 then
 	# Check available disk space (in KB)
-	available_kb=$(df "$ambianceDir" --output=avail -k)
+	available_kb=$(df "$ambianceDir" --output=avail -k | tail -n1)
 	# Estimate needed space: ~13GB for 15 hours of pink noise FLAC
 	needed_kb=$((13 * 1024 * 1024))  # 13GB in KB
 
-	if [[ $available_kb -lt $needed_kb ]]; then
+	if [[ $available_kb -lt $needed_kb ]]
+	then
 		echo
 		echo "WARNING: Low disk space detected!"
 		echo "Available: $(($available_kb / 1024 / 1024)) GB"
@@ -332,9 +283,8 @@ then
 		echo
 		read -p "Generate full pink noise file anyway? (y/n) " -n 1 -r
 		echo
-		if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-			echo "Skipping full pink noise generation. You can run it later with:"
-			echo "  sudo /usr/local/bin/generate-pink-noise.sh $pinkNoisePath $pinkNoiseTargetLength"
+		if [[ ! "$REPLY" =~ ^[Yy]$ ]]
+		then
 			exit 0
 		fi
 	fi
@@ -343,5 +293,5 @@ then
 	echo 'next comes pink noise generation, which will take roughly another hour (on a Pi 3 at least)'
 	echo -n 'should be done about ' && date '+%F %R' --date '1 hour'
 
-	time sudo /usr/local/bin/generate-pink-noise.sh "$pinkNoisePath" "$pinkNoiseTargetLength"
+	time "$scriptDir/generate-pink-noise.sh" "$pinkNoisePath" "$pinkNoiseTargetLength"
 fi

@@ -9,4 +9,4 @@ ExecStart=/usr/bin/mpc play
 RemainAfterExit=yes
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

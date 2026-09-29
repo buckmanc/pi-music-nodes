@@ -43,9 +43,3 @@ mv "$tempFileName" "$output_file" && rm -rf "$tempTempDir"
 
 echo -n "pink noise file: "
 (cd "$outputDir" && ls -sh "$outputFileNameFull")
-
-# ideally this shouldn't be here, but if it's called from the main script it'll re-prompt for sudo auth after the long sox gen call
-if id "mpd" >/dev/null 2>&1
-then
-    chown mpd:audio "$output_file"
-fi
