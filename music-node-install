@@ -32,6 +32,9 @@ uvPath="$homeDir/.local/bin/uv"
 sendspinPath="$homeDir/.local/bin/sendspin"
 sendspinConfig="$homeDir/.config/sendspin/settings-daemon.json"
 repoSendspinConfig="$musicNodeTempPath/config/sendspin-settings-daemon.json"
+mainWireplumberConfigPath="$homeDir/.config/wireplumber/wireplumber.conf"
+defaultWireplumberConfigPath="/usr/share/wireplumber/wireplumber.conf"
+defaultWireplumberUrl='https://raw.githubusercontent.com/PipeWire/wireplumber/refs/heads/master/src/config/wireplumber.conf'
 
 # add mkdir -p behaviour to cp
 mkcp() {
@@ -81,6 +84,11 @@ getManufacturer() {
 if [[ "$EUID" -eq 0 ]]
 then
 	echo "heavens to betsy, don't run this script with sudo!"
+	exit 1
+elif [[ ! -t 0 ]]
+then
+	echo 'this script needs to be run interactively'
+	echo 'please hang up and try again'
 	exit 1
 fi
 
@@ -132,6 +140,23 @@ jq --arg devMan "$deviceManufacturer" '.manufacturer = $devMan' "$repoSendspinCo
 # install configs
 mkcp "$musicNodeTempPath/config/mpd.conf" "$homeDir/.config/mpd/mpd.conf"
 mkdir -p "$homeDir/mpd"
+
+# wireplumber needs a main config file in order to load our fragment
+if [[ ! -f "$mainWireplumberConfigPath" ]]
+then
+	# use the distributors default file if it's present
+	if [[ -f "$defaultWireplumberConfigPath" ]]
+	then
+		mkcp "$defaultWireplumberConfigPath" "$mainWireplumberConfigPath"
+	# otherwise download the source
+	# risk: this could be more up-to-date than the machine's wireplumber install
+	else
+		curl -fsSL "$defaultWireplumberUrl" > "$mainWireplumberConfigPath"
+		# echo "{}" > "$mainWireplumberConfigPath"
+
+	fi
+fi
+
 mkcp "$musicNodeTempPath/config/wireplumber.conf" "$homeDir/.config/wireplumber/wireplumber.conf.d/music_node_defaults.conf"
 
 # if the sendspin config already exists, merge our files only overwriting nulls
@@ -293,5 +318,7 @@ then
 	echo 'next comes pink noise generation, which will take roughly another hour (on a Pi 3 at least)'
 	echo -n 'should be done about ' && date '+%F %R' --date '1 hour'
 
-	time "$scriptDir/generate-pink-noise.sh" "$pinkNoisePath" "$pinkNoiseTargetLength"
+	"$scriptDir/generate-pink-noise.sh" "$pinkNoisePath" "$pinkNoiseTargetLength"
+
+	echo -n 'done at ' && date '+%F %R'
 fi
