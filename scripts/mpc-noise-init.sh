@@ -28,5 +28,5 @@ mpc rescan
 mpc repeat on
 mpc single on
 mpc clear
-mpc add ambient/pink_noise.flac
+mpc add ambient/noise.flac
 mpc pause

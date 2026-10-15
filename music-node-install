@@ -14,10 +14,10 @@ set -e
 
 # 54000 = 15 hours
 # enough to safely never loop overnight
-pinkNoiseTargetLength=54000
-pinkNoiseTempLength=60
+noiseTargetLength=54000
+noiseTempLength=60
 
-optPinkNoiseOnBoot=0
+optNoiseOnBoot=0
 optMqttMonitor=0
 
 musicNodeRootGitUrl='https://github.com/buckmanc/pi-music-nodes'
@@ -81,6 +81,20 @@ getManufacturer() {
 	echo "${devMan:-openvoid.org}"
 }
 
+# Get the current length of the noise file in seconds
+# Returns 0 if file doesn't exist or can't be read
+get_noise_length() {
+	local noise_file="$1"
+	if [[ -f "$noise_file" ]]
+	then
+		local length=0
+		length="$(soxi -D "$noise_file" 2>/dev/null || echo 0)"
+		echo "${length%%.*}"
+	else
+		echo 0
+	fi
+}
+
 if [[ "$EUID" -eq 0 ]]
 then
 	echo "heavens to betsy, don't run this script with sudo!"
@@ -99,15 +113,47 @@ then
 	exit 1
 fi
 
+# -------- cleanup old mpc-pink-noise services and files --------
+
+# Stop and disable old services if they exist
+old_services=("mpc-pink-noise-init.service" "mpc-pink-noise-init.timer" "mpc-pink-noise-on-boot.service")
+for svc in "${old_services[@]}"
+do
+	if systemctl --user is-enabled --quiet "$svc" 2>/dev/null
+	then
+		systemctl --user disable --now "$svc"
+	fi
+
+	serviceFilePath="$homeDir/.config/systemd/user/$svc"
+
+	if [[ -f "$serviceFilePath" ]]
+	then
+		rm -f "$serviceFilePath"
+		echo "Removed old service file: $svc"
+	fi
+done
+
+# Remove old pink_noise.flac file
+old_noise_file="$homeDir/mpd/music/ambient/pink_noise.flac"
+
+if [[ -f "$old_noise_file" ]]
+then
+	rm -f "$old_noise_file"
+	echo "Removed old noise file: $old_noise_file"
+fi
+
+# Reload systemd to pick up removed services
+systemctl --user daemon-reload
+
 # this is gonna ask every time, that's pretty annoying
 # but I guess it probably should. we won't be running this every day, after all
-if ! systemctl --user is-active --quiet "mpc-pink-noise-on-boot"
+if ! systemctl --user is-active --quiet "mpc-noise-on-boot"
 then
-	read -p "Would you like to enable pink noise on boot? (y/n) " -n 1 -r
+	read -p "Would you like to enable white/pink/etc noise on boot? (y/n) " -n 1 -r
 	echo
 	if [[ "$REPLY" =~ ^[Yy]$ ]]
 	then
-		optPinkNoiseOnBoot=1
+		optNoiseOnBoot=1
 	fi
 fi
 
@@ -119,6 +165,69 @@ then
 	then
 		optMqttMonitor=1
 	fi
+fi
+
+# -------- ambient noise via mpd/mpc --------
+ambianceDir="$homeDir/mpd/music/ambient"
+noisePath="$ambianceDir/noise.flac"
+
+mkdir -p "$ambianceDir"
+
+# Check if full-length noise file already exists
+skipNoisePrompt=0
+noiseCurrentLength="$(get_noise_length "$noisePath")"
+if [[ "$noiseCurrentLength" -ge "$noiseTargetLength" ]]
+then
+	echo
+	echo "Full-length noise file already exists ($(($noiseCurrentLength / 3600)) hours)."
+	echo "Skipping noise type selection. To regenerate, delete $noisePath and re-run."
+	echo
+	skipNoisePrompt=1
+	# Use a default noise type for the short generation (won't be used since file exists)
+	noiseType="whitenoise"
+	skipLongGeneration=1
+fi
+
+if [[ "$skipNoisePrompt" -eq 0 ]]
+then
+	# Prompt for noise type
+	echo
+	echo "Select noise type for ambient noise generation:"
+	echo "  1) white noise (default)"
+	echo "  2) pink noise"
+	echo "  3) wink noise"
+	echo "  4) brown noise"
+	echo "  5) none (skip long generation)"
+	read -p "Enter choice [1-5] (default 1): " noiseChoice
+	echo
+
+	case "$noiseChoice" in
+	    1|"")
+	        noiseType="whitenoise"
+	        skipLongGeneration=0
+	        ;;
+	    2)
+	        noiseType="pinknoise"
+	        skipLongGeneration=0
+	        ;;
+	    3)
+	        noiseType="winknoise"
+	        skipLongGeneration=0
+	        ;;
+	    4)
+	        noiseType="brownnoise"
+	        skipLongGeneration=0
+	        ;;
+	    5|n|none)
+	        noiseType="whitenoise"  # default for short generation
+	        skipLongGeneration=1
+	        ;;
+	    *)
+	        echo "Invalid choice, defaulting to whitenoise"
+	        noiseType="whitenoise"
+	        skipLongGeneration=0
+	        ;;
+	esac
 fi
 
 # update and install dependencies
@@ -168,8 +277,8 @@ else
 fi
 
 # install scripts
-mkcp "$musicNodeTempPath/scripts/generate-pink-noise.sh" "$scriptDir/generate-pink-noise.sh"
-mkcp "$musicNodeTempPath/scripts/mpc-pink-noise-init.sh" "$scriptDir/mpc-pink-noise-init.sh"
+mkcp "$musicNodeTempPath/scripts/generate-noise.sh" "$scriptDir/generate-noise.sh"
+mkcp "$musicNodeTempPath/scripts/mpc-noise-init.sh" "$scriptDir/mpc-noise-init.sh"
 
 # install services
 mkdir -p "$homeDir/.config/systemd/user"
@@ -244,25 +353,19 @@ curl -sL "$raspotifyInstallUrl"  | sh
 # disable the system-level service in favor of our user-level service
 sudo systemctl disable --now raspotify
 
-# -------- pink noise via mpd/mpc --------
-ambianceDir="$homeDir/mpd/music/ambient"
-pinkNoisePath="$ambianceDir/pink_noise.flac"
-
-mkdir -p "$ambianceDir"
-
-if [[ ! -f "$pinkNoisePath" ]]
+# generate a placeholder noise file if it doesn't exist
+if [[ ! -f "$noisePath" ]]
 then
-	# generate a placeholder pink noise file, full one comes later
-	"$scriptDir/generate-pink-noise.sh" "$pinkNoisePath" "$pinkNoiseTempLength"
+	"$scriptDir/generate-noise.sh" "$noisePath" "$noiseTempLength" "$noiseType"
 fi
 
 # -------- enable services --------
 
-services=(pipewire pipewire-pulse wireplumber sendspin raspotify mpd mpc-pink-noise-init mpc-pink-noise-init.timer)
+services=(pipewire pipewire-pulse wireplumber sendspin raspotify mpd mpc-noise-init mpc-noise-init.timer)
 
-if systemctl --user is-active --quiet "mpc-pink-noise-on-boot" || [[ "$optPinkNoiseOnBoot" == 1 ]]
+if systemctl --user is-active --quiet "mpc-noise-on-boot" || [[ "$optNoiseOnBoot" == 1 ]]
 then
-	services+=(mpc-pink-noise-on-boot)
+	services+=(mpc-noise-on-boot)
 fi
 
 # pick up all service file changes
@@ -278,25 +381,20 @@ done
 # report status to the user
 "$musicNodeTempPath/scripts/status.sh"
 
-if [[ -s "$pinkNoisePath" ]]
-then
-	pinkNoiseCurrentLength="$(soxi -D "$pinkNoisePath")"
-	pinkNoiseCurrentLength="${pinkNoiseCurrentLength%%.*}"
-else
-	pinkNoiseCurrentLength=0
-fi
+# Re-check noise length after potential short generation
+noiseCurrentLength="$(get_noise_length "$noisePath")"
 
 echo
 echo 'your pi music node is now set up and ready to use'
 
-# -------- big pink noise generation --------
+# -------- big noise generation --------
 
-# check if remaining drive space is too small for pink noise and ask if the user wants to generate the full file
-if [[ "$pinkNoiseCurrentLength" -lt "$pinkNoiseTargetLength" ]]
+# check if remaining drive space is too small for noise and ask if the user wants to generate the full file
+if [[ "$skipLongGeneration" -eq 0 && "$noiseCurrentLength" -lt "$noiseTargetLength" ]]
 then
 	# Check available disk space (in KB)
 	available_kb=$(df "$ambianceDir" --output=avail -k | tail -n1)
-	# Estimate needed space: ~13GB for 15 hours of pink noise FLAC
+	# Estimate needed space: ~13GB for 15 hours of noise FLAC
 	needed_kb=$((13 * 1024 * 1024))  # 13GB in KB
 
 	if [[ $available_kb -lt $needed_kb ]]
@@ -304,9 +402,9 @@ then
 		echo
 		echo "WARNING: Low disk space detected!"
 		echo "Available: $(($available_kb / 1024 / 1024)) GB"
-		echo "Estimated needed for full pink noise: ~13 GB"
+		echo "Estimated needed for full noise: ~13 GB"
 		echo
-		read -p "Generate full pink noise file anyway? (y/n) " -n 1 -r
+		read -p "Generate full noise file anyway? (y/n) " -n 1 -r
 		echo
 		if [[ ! "$REPLY" =~ ^[Yy]$ ]]
 		then
@@ -315,10 +413,10 @@ then
 	fi
 
 	echo
-	echo 'next comes pink noise generation, which will take roughly another hour (on a Pi 3 at least)'
+	echo 'next comes noise generation, which will take roughly another hour (on a Pi 3 at least)'
 	echo -n 'should be done about ' && date '+%F %R' --date '1 hour'
 
-	"$scriptDir/generate-pink-noise.sh" "$pinkNoisePath" "$pinkNoiseTargetLength"
+	"$scriptDir/generate-noise.sh" "$noisePath" "$noiseTargetLength" "$noiseType"
 
 	echo -n 'done at ' && date '+%F %R'
 fi

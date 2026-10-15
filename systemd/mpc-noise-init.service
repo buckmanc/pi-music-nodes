@@ -1,11 +1,11 @@
 [Unit]
-Description=Load pink noise track into mpd queue
+Description=Load noise track into mpd queue
 After=mpd.service
 Requires=mpd.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/mpc-pink-noise-init.sh
+ExecStart=%h/.local/bin/mpc-noise-init.sh
 RemainAfterExit=yes
 
 [Install]
