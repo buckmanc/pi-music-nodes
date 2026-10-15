@@ -30,9 +30,13 @@ trap 'rm -rf "$tempTempDir"' INT TERM
 # generates a ~13 GB file for 15 hours of pink noise
 # gotta leave --guardrails out as this causes double the required storage space
 # don't need --temp as we're avoiding triggering temp dir usage due to storage limits
+# sox --combine merge \
+#     "|sox -n -r 44100 -c 1 -p synth ${duration} pinknoise vol 0.9" \
+#     "|sox -n -r 44100 -c 1 -p synth ${duration} pinknoise vol 0.9" \
+#     -c 2 -r 44100 "$tempFileName"
 sox --combine merge \
-    "|sox -n -r 44100 -c 1 -p synth ${duration} pinknoise vol 0.9" \
-    "|sox -n -r 44100 -c 1 -p synth ${duration} pinknoise vol 0.9" \
+    "|sox -n -r 44100 -c 1 -p synth ${duration} whitenoise vol 0.5 sinc -15500 bass +12 300" \
+    "|sox -n -r 44100 -c 1 -p synth ${duration} whitenoise vol 0.5 sinc -15500 bass +12 300" \
     -c 2 -r 44100 "$tempFileName"
 
 # mono version
